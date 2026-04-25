@@ -1,0 +1,413 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Kenya TB GIS Dashboard</title>
+
+    <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css"/>
+    <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+
+    <!-- Chart.js -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+    <style>
+        body { margin: 0; font-family: Arial; }
+
+        #container {
+            display: flex;
+            height: 100vh;
+        }
+
+        #sidebar {
+            width: 340px;
+            background: #1f2a36;
+            color: white;
+            padding: 15px;
+            overflow-y: auto;
+        }
+
+        #map {
+            flex: 1;
+        }
+
+        input {
+            width: 100%;
+            margin: 5px 0;
+            padding: 6px;
+        }
+
+        button {
+            width: 100%;
+            padding: 10px;
+            margin-top: 5px;
+            background: #27ae60;
+            color: white;
+            border: none;
+            cursor: pointer;
+        }
+
+        button:hover {
+            background: #1e8449;
+        }
+
+        #result {
+            margin-top: 10px;
+            background: #2c3e50;
+            padding: 10px;
+            border-radius: 5px;
+        }
+
+        #stats {
+            margin-top: 10px;
+            background: #34495e;
+            padding: 10px;
+            border-radius: 5px;
+        }
+
+        canvas {
+            background: white;
+            border-radius: 6px;
+            padding: 8px;
+        }
+
+        /* LEGEND */
+        .legend {
+            background: white;
+            padding: 10px;
+            line-height: 18px;
+            color: #333;
+            border-radius: 6px;
+        }
+
+        .legend i {
+            width: 18px;
+            height: 18px;
+            float: left;
+            margin-right: 8px;
+            opacity: 0.8;
+        }
+    </style>
+</head>
+
+<body>
+
+<div id="container">
+
+    <!-- SIDEBAR -->
+    <div id="sidebar">
+
+        <h2>🏥 TB Dashboard</h2>
+
+        <form id="predictionForm">
+
+            <input type="number" step="any" id="latitude" placeholder="Latitude">
+            <input type="number" step="any" id="longitude" placeholder="Longitude">
+
+            <input type="number" id="population_density" placeholder="Population Density">
+            <input type="number" step="any" id="healthcare_access_score" placeholder="Healthcare Access">
+            <input type="number" step="any" id="poverty_rate" placeholder="Poverty Rate">
+            <input type="number" step="any" id="climate_factor" placeholder="Climate Factor">
+            <input type="number" step="any" id="sanitation_index" placeholder="Sanitation Index">
+
+            <button type="submit">Predict</button>
+
+        </form>
+
+        <div id="result"></div>
+
+        <div id="stats">
+            <h3>📊 County Statistics</h3>
+            <canvas id="countyChart"></canvas>
+        </div>
+
+    </div>
+
+    <!-- MAP -->
+    <div id="map"></div>
+
+</div>
+
+<script>
+
+// ================= MAP =================
+var map = L.map('map').setView([-1.29, 36.82], 6);
+var marker = null;
+var countiesLayer = null;
+let countyChart = null;
+
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
+
+// ================= CHOROPLETH COLOR SCALE =================
+function getColor(d) {
+    return d > 80 ? "#800026" :
+           d > 60 ? "#BD0026" :
+           d > 40 ? "#E31A1C" :
+           d > 20 ? "#FD8D3C" :
+           d > 10 ? "#FED976" :
+                    "#31a354";
+}
+
+// ================= LOAD COUNTIES =================
+async function loadCounties(){
+
+    const res = await fetch("/county-data");
+    const geojson = await res.json();
+
+    function style(feature){
+        return {
+            fillColor: getColor(feature.properties.tb_score),
+            color: "white",
+            weight: 1,
+            fillOpacity: 0.75
+        };
+    }
+
+    countiesLayer = L.geoJSON(geojson, {
+        style: style,
+
+        onEachFeature: function(feature, layer){
+
+            layer.on("click", function(){
+
+                let name =
+                    feature.properties.NAME_1 ||
+                    feature.properties.name ||
+                    feature.properties.county;
+
+                highlightCounty(name);
+                loadCountyStats(name);
+            });
+
+            layer.bindTooltip(
+                `${feature.properties.NAME_1}<br>TB Score: ${feature.properties.tb_score}`,
+                {sticky: true}
+            );
+        }
+    }).addTo(map);
+}
+
+loadCounties();
+
+// ================= LEGEND =================
+var legend = L.control({position: "bottomright"});
+
+legend.onAdd = function () {
+
+    var div = L.DomUtil.create("div", "legend");
+    var grades = [0, 10, 20, 40, 60, 80];
+
+    div.innerHTML += "<b>TB Risk Level</b><br>";
+
+    for (var i = 0; i < grades.length; i++) {
+        div.innerHTML +=
+            '<i style="background:' + getColor(grades[i] + 1) + '"></i>' +
+            grades[i] + (grades[i + 1] ? "&ndash;" + grades[i + 1] + "<br>" : "+");
+    }
+
+    return div;
+};
+
+legend.addTo(map);
+
+// ================= MAP CLICK =================
+map.on('click', function(e){
+
+    let lat = e.latlng.lat;
+    let lon = e.latlng.lng;
+
+    latitude.value = lat;
+    longitude.value = lon;
+
+    if(marker){
+        map.removeLayer(marker);
+    }
+
+    marker = L.marker([lat, lon]).addTo(map);
+});
+
+// ================= HIGHLIGHT COUNTY =================
+function highlightCounty(countyName){
+
+    countiesLayer.eachLayer(function(layer){
+
+        let name =
+            layer.feature.properties?.NAME_1 ||
+            layer.feature.properties?.county ||
+            layer.feature.properties?.name ||
+            "";
+
+        name = name.toString().trim().toLowerCase();
+        let target = countyName.toString().trim().toLowerCase();
+
+        layer.setStyle({
+            fillColor: "#3388ff",
+            weight: 1,
+            color: "white"
+        });
+
+        if(name === target){
+
+            layer.setStyle({
+                fillColor: "#ffff00",
+                weight: 3,
+                color: "#000"
+            });
+
+            map.flyToBounds(layer.getBounds(), {duration: 1.2});
+        }
+    });
+}
+
+// ================= COUNTY STATS (UPGRADED DASHBOARD CHART) =================
+async function loadCountyStats(county){
+
+    const res = await fetch("/county-stats/" + county);
+    const data = await res.json();
+
+    const totalBurden =
+        data.infected +
+        data.on_art +
+        data.deaths +
+        data.malnourished +
+        data.new_infections;
+
+    const chartData = {
+        labels: ["Infected", "On ART", "Deaths", "Malnourished", "New Cases"],
+        datasets: [{
+            data: [
+                data.infected,
+                data.on_art,
+                data.deaths,
+                data.malnourished,
+                data.new_infections
+            ],
+            backgroundColor: [
+                "#e74c3c",
+                "#2ecc71",
+                "#34495e",
+                "#f1c40f",
+                "#9b59b6"
+            ]
+        }]
+    };
+
+    if (countyChart) {
+        countyChart.destroy();
+    }
+
+    countyChart = new Chart(document.getElementById("countyChart"), {
+
+        type: "doughnut",
+
+        data: chartData,
+
+        options: {
+            responsive: true,
+            cutout: "60%",
+
+            plugins: {
+
+                title: {
+                    display: true,
+                    text: `TB Burden - ${county}`,
+                    color: "black",
+                    font: {
+                        size: 14,
+                        weight: "bold"
+                    }
+                },
+
+                legend: {
+                    position: "right",
+                    labels: {
+                        color: "black",
+                        font: {
+                            size: 11,
+                            weight: "bold"
+                        },
+
+                        generateLabels: function(chart) {
+                            const data = chart.data;
+
+                            return data.labels.map((label, i) => {
+                                const value = data.datasets[0].data[i];
+
+                                return {
+                                    text: `${label}: ${value}`,
+                                    fillStyle: data.datasets[0].backgroundColor[i],
+                                    strokeStyle: "#000",
+                                    lineWidth: 1,
+                                    index: i
+                                };
+                            });
+                        }
+                    }
+                },
+
+                tooltip: {
+                    backgroundColor: "#2c3e50",
+                    titleColor: "#fff",
+                    bodyColor: "#fff"
+                }
+            }
+        },
+
+        plugins: [{
+            id: "centerText",
+            beforeDraw: function(chart) {
+                const width = chart.width;
+                const height = chart.height;
+                const ctx = chart.ctx;
+
+                ctx.restore();
+
+                const text = totalBurden;
+                ctx.font = "20px Arial";
+                ctx.fillStyle = "#2c3e50";
+                ctx.textAlign = "center";
+                ctx.textBaseline = "middle";
+
+                ctx.fillText(text, width / 2, height / 2);
+
+                ctx.save();
+            }
+        }]
+    });
+}
+
+// ================= PREDICT =================
+document.getElementById("predictionForm").addEventListener("submit", async function(e){
+
+    e.preventDefault();
+
+    const data = {
+        latitude: parseFloat(latitude.value),
+        longitude: parseFloat(longitude.value),
+        population_density: parseInt(population_density.value),
+        healthcare_access_score: parseFloat(healthcare_access_score.value),
+        poverty_rate: parseFloat(poverty_rate.value),
+        climate_factor: parseFloat(climate_factor.value),
+        sanitation_index: parseFloat(sanitation_index.value)
+    };
+
+    const res = await fetch("/predict", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify(data)
+    });
+
+    const result = await res.json();
+
+    document.getElementById("result").innerHTML =
+        "📍 County: <b>" + result.county + "</b><br>" +
+        "📊 TB: <b>" + result.prediction + "</b><br>" +
+        "⚠️ Risk: <b>" + result.risk_level + "</b>";
+
+    highlightCounty(result.county);
+    loadCountyStats(result.county);
+
+});
+
+</script>
+
+</body>
+</html>
